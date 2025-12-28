@@ -21,6 +21,13 @@ function dayKey(d = new Date()) {
   return `${y}-${m}-${dd}`;
 }
 
+function msUntilNextMidnight(d = new Date()) {
+  // Local midnight of the user's phone
+  const next = new Date(d);
+  next.setHours(24, 0, 0, 0); // next day's 00:00:00.000
+  return Math.max(0, next.getTime() - d.getTime());
+}
+
 function recommendGoalML({ weightKg, activity, warm }) {
   // Simple, standard-feeling estimate: ~33 ml/kg + activity + warm climate
   const base = weightKg * 33;
@@ -167,7 +174,7 @@ export default function WaterBottleTracker() {
     }
   });
 
-  // Keep a live ref so we can persist on iOS page unload / app background.
+  // Keep a live ref so we can do midnight resets + persist on iOS background/unload.
   const stateRef = useRef(state);
   useEffect(() => {
     stateRef.current = state;
@@ -181,40 +188,59 @@ export default function WaterBottleTracker() {
     }
   }
 
-  // Day reset
+  // Day reset at the user's local midnight (00:00 on their phone)
   useEffect(() => {
-    const today = dayKey();
-    if (state.dayKey !== today) {
+    const resetToTodayIfNeeded = () => {
+      const today = dayKey();
       setState((s) => {
+        if (s.dayKey === today) return s;
         const next = { ...s, dayKey: today, completedBottles: 0, remaining: 1, history: [], celebrate: null };
         persistNow(next);
         return next;
       });
-    }
-  }, [state.dayKey]);
-
-  // Persist (more robust on iOS Safari)
-  useEffect(() => {
-    // normal persistence after renders
-    persistNow(state);
-  }, [state]);
-
-  useEffect(() => {
-    // iOS Safari can kill/reload tabs aggressively; save on background/unload too.
-    const save = () => persistNow(stateRef.current);
-
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") save();
     };
 
-    window.addEventListener("pagehide", save);
+    // Run once on mount (covers Safari reloads)
+    resetToTodayIfNeeded();
+
+    // Schedule the next reset exactly after local midnight
+    let timeoutId;
+    const scheduleNext = () => {
+      const ms = msUntilNextMidnight();
+      timeoutId = window.setTimeout(() => {
+        resetToTodayIfNeeded();
+        scheduleNext();
+      }, ms + 50);
+    };
+    scheduleNext();
+
+    // If the user opens the app after midnight, ensure we reset immediately.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") resetToTodayIfNeeded();
+      if (document.visibilityState === "hidden") {
+        // Save progress when iOS backgrounds the tab/PWA
+        persistNow(stateRef.current);
+      }
+    };
+
+    const onPageHide = () => {
+      persistNow(stateRef.current);
+    };
+
     document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", onPageHide);
 
     return () => {
-      window.removeEventListener("pagehide", save);
+      if (timeoutId) window.clearTimeout(timeoutId);
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", onPageHide);
     };
   }, []);
+
+  // Persist
+  useEffect(() => {
+    persistNow(state);
+  }, [state]);
 
   // Derived
   const bottlesNeededInt = useMemo(() => ceilDiv(state.goalML, state.bottleML), [state.goalML, state.bottleML]);
@@ -300,7 +326,6 @@ export default function WaterBottleTracker() {
         };
       }
 
-      persistNow(nextState);
       return nextState;
     });
   }
@@ -310,14 +335,12 @@ export default function WaterBottleTracker() {
       const h = s.history || [];
       if (h.length === 0) return s;
       const last = h[h.length - 1];
-      const next = {
+      return {
         ...s,
         remaining: last.prevRemaining,
         completedBottles: last.prevCompleted,
         history: h.slice(0, -1),
       };
-      persistNow(next);
-      return next;
     });
   }
 
